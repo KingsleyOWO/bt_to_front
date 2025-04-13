@@ -1,0 +1,16 @@
+# .env 文件範例
+
+# SSH Tunnel 設定
+SSH_HOST='dv107.coded2.fun'       # SSH 跳轉主機的 IP 或主機名
+SSH_PORT='8022'                  # SSH 連接埠 (如果不是 22)
+SSH_USERNAME='your_ssh_login_name' # SSH 登入帳號
+SSH_PASSWORD='your_ssh_password'   # SSH 登入密碼
+
+# 遠端資料庫設定 (相對於 SSH 跳轉主機)
+DB_REMOTE_HOST='labdb.coded2.fun'   # 資料庫伺服器的 IP 或主機名
+# DB_REMOTE_PORT='3306'             # 資料庫連接埠 (程式碼中已預設 3306)
+
+# 資料庫憑證
+DB_USER='your_database_username'    # 資料庫使用者名稱
+DB_PASSWORD='your_database_password'# 資料庫密碼
+DB_NAME='YOUR_DATABASE_NAME'        # 要使用的資料庫名稱
