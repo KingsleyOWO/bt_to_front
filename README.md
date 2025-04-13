@@ -27,37 +27,26 @@
     * -> (SSH 通道 & 批次插入) -> **MySQL 資料庫**
 
 
-安裝與設定
-1. 環境準備:
+##  安裝環境與設定環境變數
 
-安裝 Python 3.7 或更高版本。
-安裝所需的 Python 函式庫：
-建立一個名為 requirements.txt 的檔案，包含以下內容：
-Plaintext
+安裝 requirement.txt
+設定.env
 
-3. 後端設定 (server.py):
-
-藍牙配對: 將你的行動裝置與執行後端的機器進行藍牙配對。記下伺服器的藍牙 MAC 位址，供手機 App 連線時使用。
-執行伺服器:
+##  執行伺服器:
 Bash
-
 python server.py
 伺服器啟動後會嘗試建立資料庫表格，並開始監聽藍牙 (Channel 4) 和 WebSocket (Port 8765) 連接。
 確保防火牆允許相關的連接埠和藍牙通訊。
-4. 前端設定 (index.htm):
-
+##  前端設定 (index.htm):
 託管檔案: 使用任何網頁伺服器提供專案中的 HTML/CSS/JS 檔案，或直接在瀏覽器中開啟 index.htm。
 設定 WebSocket 位址:
 編輯 index.htm。
 找到檔案末尾 <script> 標籤內的 WS_SERVER 常數。
 將其值修改為後端 server.py 正在運行的 實際 IP 位址或主機名 以及 Port (預設是 ws://<你的後端IP>:8765)。
-5. 手機配套 App 設定:
 
-
-關於原始 Pac-Man Canvas
+##  關於原始 Pac-Man Canvas
 本專案的遊戲前端基於 Pacman Canvas 進行修改。感謝原作者的貢獻。
 
-(您可以在此處附加原始儲存庫的 README 內容，或保留以上連結即可)
 
 授權條款 (License)
 本專案可能繼承自原始 Pacman Canvas 的授權條款。原始作品使用 Creative Commons Attribution-ShareAlike 4.0 International License (姓名標示-相同方式分享 4.0 國際)。請遵守此授權條款。
