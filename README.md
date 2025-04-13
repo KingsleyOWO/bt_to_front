@@ -1,158 +1,68 @@
-pacman-canvas
-=============
+# 透過藍牙與 WebSocket 以陀螺儀控制的小精靈 (Pac-Man)
 
-An old classic, re-written in HTML5.
-Visit http://pacman.platzh1rsch.ch to see it live.
+本專案展示如何使用智慧型手機的陀螺儀感測器來控制經典的 Pac-Man 網頁遊戲。感測器數據透過藍牙無線傳輸至 Python 後端伺服器，伺服器再利用 WebSocket 技術即時將控制指令轉發給網頁前端遊戲。同時，陀螺儀數據也會被記錄到 MySQL 資料庫中。
 
-Sounds from 
-http://soundfxcenter.com/ and http://soundfxnow.com/
+此專案以前端的 [Pacman Canvas HTML5](https://github.com/platzhersh/pacman-canvas) 遊戲為基礎進行修改。
+![image](https://github.com/user-attachments/assets/214cdc62-77a5-49be-821c-4a5aa0889cd5)
 
-------
+## 主要功能
+* **即時遊戲控制：** 使用手機的物理傾斜來導航 Pac-Man。
+* **無線感測器串流：** 使用藍牙 RFCOMM 從行動裝置傳輸陀螺儀數據。
+* **低延遲更新：** 採用 WebSocket 技術，實現後端到前端遊戲的即時指令中繼。
+* **異步後端：** 使用 Python 的 `asyncio` 處理 WebSocket，並透過 `threading` 處理藍牙和資料庫 I/O。
+* **數據持久化：** 將帶有時間戳的陀螺儀數據 (X, Y, Z) 記錄到 MySQL 資料庫。
+* **安全資料庫連線：** 利用 SSH Tunnel (`sshtunnel`) 安全地連接到遠端資料庫。
+* **動態建立資料表：** 每次執行時，自動為該次的工作階段(Session)數據建立一個帶有時間戳的新資料表。
+* **優化資料庫寫入：** 實作批次插入 (Batch Insertion) 以提升資料庫效能。
 
-License
-=======
 
-Feel free to use / copy / modify my code, as long as you reshare your version and give some credit to the original author (me).
+## 系統架構
 
-<a rel="license" href="http://creativecommons.org/licenses/by-sa/4.0/"><img alt="Creative Commons License" style="border-width:0" src="https://i.creativecommons.org/l/by-sa/4.0/88x31.png" /></a><br /><span xmlns:dct="http://purl.org/dc/terms/" property="dct:title">Pacman Canvas</span> by <a xmlns:cc="http://creativecommons.org/ns#" href="http://platzh1rsch.ch" property="cc:attributionName" rel="cc:attributionURL">Platzh1rsch</a> is licensed under a <a rel="license" href="http://creativecommons.org/licenses/by-sa/4.0/">Creative Commons Attribution-ShareAlike 4.0 International License</a>.<br />Based on a work at <a xmlns:dct="http://purl.org/dc/terms/" href="https://github.com/platzhersh/pacman-canvas" rel="dct:source">https://github.com/platzhersh/pacman-canvas</a>.
+系統的數據流如下：
 
-------
+1.  **手機陀螺儀** -> **手機配套App**
+2.  **手機配套App** -> (藍牙 RFCOMM) -> **Python 後端**
+3.  **Python 後端** 處理數據並分流至：
+    * -> (WebSocket) -> **前端遊戲 (index.htm)** -> (模擬鍵盤事件) -> **Pac-Man 遊戲邏輯**
+    * -> (SSH 通道 & 批次插入) -> **MySQL 資料庫**
 
-Version history
-===============
 
-*Version 0.92 - 6.3.2018*
-* remove navigator.vibrate() calls
+安裝與設定
+1. 環境準備:
 
-*Version 0.91 - 15.01.2016*
-* more tests to avoid cheaters
-* better highscore form validation
-* timer integrated (not in use yet)
-* "your screen is too small to play in landscape view" message removed
-* fix number of points for eating a ghost
+安裝 Python 3.7 或更高版本。
+安裝所需的 Python 函式庫：
+建立一個名為 requirements.txt 的檔案，包含以下內容：
+Plaintext
 
-*Version 0.9 - 15.10.2015*
-* different difficulties depending on level
-* scatter / chase indicated through wall colour
-* extended instructions
+3. 後端設定 (server.py):
 
-*Version 0.87 - 08.10.2015*
-* fix a bug that allowed resuming a game after game over
+藍牙配對: 將你的行動裝置與執行後端的機器進行藍牙配對。記下伺服器的藍牙 MAC 位址，供手機 App 連線時使用。
+執行伺服器:
+Bash
 
-*Version 0.86 - 25.05.2015*
-* some security fixes to avoid cheaters from adding highscores
+python server.py
+伺服器啟動後會嘗試建立資料庫表格，並開始監聽藍牙 (Channel 4) 和 WebSocket (Port 8765) 連接。
+確保防火牆允許相關的連接埠和藍牙通訊。
+4. 前端設定 (index.htm):
 
-*Version 0.84 - 09.11.2014*
-* fixed bug that caused game to crash when leaving game area to the right side while holding the right arrow
+託管檔案: 使用任何網頁伺服器提供專案中的 HTML/CSS/JS 檔案，或直接在瀏覽器中開啟 index.htm。
+設定 WebSocket 位址:
+編輯 index.htm。
+找到檔案末尾 <script> 標籤內的 WS_SERVER 常數。
+將其值修改為後端 server.py 正在運行的 實際 IP 位址或主機名 以及 Port (預設是 ws://<你的後端IP>:8765)。
+5. 手機配套 App 設定:
 
-*Version 0.83 - 07.05.2014*
-* not possible to stop by turning into walls anymore
-* mute / unmute the game by pressing the "M" key
 
-*Version 0.82 - 02.04.2014*
-* small bugfixes
-* swipe gestures detection on the whole screen not only game area
+關於原始 Pac-Man Canvas
+本專案的遊戲前端基於 Pacman Canvas 進行修改。感謝原作者的貢獻。
 
-*Version 0.81 - 16.03.2014*
-* Ghost Modes Scatter & Chase
-* Pathfinding AI for Blinky
-* Ghosts need to return to Ghost House when dead
+(您可以在此處附加原始儲存庫的 README 內容，或保留以上連結即可)
 
-*Version 0.8 - 13.11.2013*
-* lots of small changes in the backend
-* when you go in landscape mode and your screen is too small to display the whole site, you get notified to rotate your phone into portrait mode
-* all onClick and onMousedown in HTML removed and replaced by EventListeners in JavaScript
-* Pacman Canvas now uses ApplicationCache to cache its content, so you can play the game offline!
+授權條款 (License)
+本專案可能繼承自原始 Pacman Canvas 的授權條款。原始作品使用 Creative Commons Attribution-ShareAlike 4.0 International License (姓名標示-相同方式分享 4.0 國際)。請遵守此授權條款。
 
-*Version 0.78 - 05.11.2013*
-* navigation via buttons should be less delayed by using onMouseDown event instead of onClick
-* refreshRate is now a game attribute and could be changed easily during the game (not yet implemented in frontend)
+<a rel="license" href="http://creativecommons.org/licenses/by-sa/4.0/"><img alt="Creative Commons License" style="border-width:0" src="https://i.creativecommons.org/l/by-sa/4.0/88x31.png" /></a>   
 
-*Version 0.77 - 24.05.2013*
-* Ghosts start to blink before to undazzle
-* Pacman now dies with style
-
-*Version 0.76 - 02.05.2013*
-* You can now use the usual arrow keys to control pacman
-* fixed 2 small bugs regarding KeyEvents
-
-*Version 0.75 - 28.04.2013*
-* You can pause / resume the game by pressing SPACE
-* ESC is no longer used to pause / resume, but to go back to the main view
-* Game Menu only showing while game is paused
-* some css tweaks
-* Simple Highscore implemented using Ajax, Json and Sqlite3
-
-*Version 0.74 - 25.04.2013*
-* You can pause / resume the game by pressing ESC or clicking into canvas
-* Swipe Gestures using hammerjs
-* replaced alerts by nice html overlay messages
-
-*Version 0.73 - 17.04.2013*
-* You can play on until you lost all your 3 lives
-* Ghosts state gets reset everytime they get eaten or new level starts
-
-*Version 0.72 - 30.01.2013*
-* Ghost Base Door
-* Reset Game after winning
-
-*Version 0.71 - 30.01.2013*
-* Ghosts can die too
-
-*Version 0.7 - 29.01.2013*
-* Powerpills & Beastmode
-
-*Version 0.63 - 29.01.2013*
-* Pills now get loaded over external json file (map.json)
-* ghost collisions implemented -> dying
-* tried to clean up the code a bit
-
-*Version 0.62 - 23.01.2013*
-* disable zoom on Mobile
-* change name to Pacman Canvas (Alpha)
-
-*Version 0.61 - 12.01.2013*
-* all walls defined (incl. collisions)
-
-*Version 0.6 - 12.01.2013*
-* small fixes for mobile view
-* sound control (default: muted)
-* collision control for walls
-* json datastructure design for all game objects (pills, magic pills, walls)
-
-*Version 0.41 - 10.12.2012*
-* Mobile Design Fix
-* New Icon
-
-*Version 0.40 - 08.12.2012*
-* Control Buttons for mobile
-* Small Design Updates
-
-*Version 0.30 - 05.12.2012*
-* Touch Support via jGestures
-* Responsive
-		
-*Version 0.20 - 22.11.2012*
-* Code Refactored for further development
-* Sound added
-* Appcache implemented
-	
-*Version 0.13 - 29.10.2012*
-* Never miss a dot: Pacman now always stays in the grid.
-			
-*Version 0.12 - 19.10.2012*
-* Pacman is now able to eat the dots. Eating a dot equals 10 points for now.
-* LiveScore implemented.
-* Game ends when all dots are eaten.
-
-*Version 0.11 - 15.10.2012*
-* Placing white Dots and storing them in a Hashtable
-* Monster/Ghost Prototype
-* Score Prototype
-* Pacman had to get smaller (r=15px)
-* Display Grid
-* Refactoring HTML
-		
-*Version 0.10 - 23.08.2012*
-* Started cleaning up the code using Objects
-* Pacman now turns around when changing directions
+致謝
+感謝 Platzh1rsch 開發了原始的 Pacman Canvas 遊戲。
