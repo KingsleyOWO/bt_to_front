@@ -3,217 +3,293 @@ import json
 import threading
 from queue import Queue
 from bluetooth import BluetoothSocket, RFCOMM
-from websockets import serve
+from websockets.server import serve
 from sshtunnel import SSHTunnelForwarder
 import pymysql
 from datetime import datetime
-# 全域隊列與 WebSocket 連線集合
+import os
+
+BLUETOOTH_CHANNEL = 4
+WEBSOCKET_HOST = "0.0.0.0"
+WEBSOCKET_PORT = 8765
+DB_BATCH_SIZE = 90
+
 broadcast_queue = Queue()
 db_queue = Queue()
 clients = set()
-# 全域變數，用來保存動態建立的資料表名稱
 table_name = None
-# 自動建立動態命名的資料表
-def create_dynamic_table():
-    """
-    每次啟動程式時，自動建立一個以當前時間命名的資料表，
-    並返回該資料表的名稱。
-    """
-    dynamic_table = "gyro_data_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # 建立 SSH 隧道：連線到外網的爬蟲機 dv107，
-    # 並在 dv107 上轉發連線到內網資料庫 labdb (埠3306)
-    with SSHTunnelForwarder(
-        ('dv107.coded2.fun', 8022),
-        ssh_username='kingsley',
-        ssh_password='ji394djp4',
-        remote_bind_address=('labdb.coded2.fun', 3306)
-    ) as tunnel:
-        # 隧道啟動後，連線到本機的 tunnel.local_bind_port
-        conn = pymysql.connect(
-            host='127.0.0.1',
-            port=tunnel.local_bind_port,
-            user='kingsley',         # 請替換成資料庫帳號（若不同）
-            password='ji394djp4',     # 請替換成資料庫密碼（若不同）
-            db='KINGSLEY'             # 資料庫名稱，請依實際情況修改
-        )
-        cursor = conn.cursor()
-        create_table_sql = f"""
-        CREATE TABLE IF NOT EXISTS `{dynamic_table}` (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            timestamp BIGINT NOT NULL,
-            x FLOAT NOT NULL,
-            y FLOAT NOT NULL,
-            z FLOAT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-        try:
-            cursor.execute(create_table_sql)
-            conn.commit()
-            print(f"資料表 {dynamic_table} 建立成功！")
-        except Exception as e:
-            print("建立資料表失敗:", e)
-        finally:
-            cursor.close()
-            conn.close()
-    
-    return dynamic_table
 
-# 藍牙接收線程
+SSH_HOST = os.environ.get('SSH_HOST', 'XXXXXX')
+SSH_PORT = int(os.environ.get('SSH_PORT', '22'))
+SSH_USERNAME = os.environ.get('SSH_USERNAME', 'your_ssh_username')
+SSH_PASSWORD = os.environ.get('SSH_PASSWORD', 'your_ssh_password')
+DB_REMOTE_HOST = os.environ.get('DB_REMOTE_HOST', 'your_db_ip')
+DB_REMOTE_PORT = 3306
+DB_USER = os.environ.get('DB_USER', 'your_db_user')
+DB_PASSWORD = os.environ.get('DB_PASSWORD', 'your_db_password')
+DB_NAME = os.environ.get('DB_NAME', 'your_db_name')
+
+def create_dynamic_table():
+    global table_name
+    table_name = "gyro_data_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    print("嘗試建立 SSH 隧道...")
+    try:
+        with SSHTunnelForwarder(
+            (SSH_HOST, SSH_PORT),
+            ssh_username=SSH_USERNAME,
+            ssh_password=SSH_PASSWORD,
+            remote_bind_address=(DB_REMOTE_HOST, DB_REMOTE_PORT)
+        ) as tunnel:
+            print(f"SSH 隧道建立成功，本地綁定 Port: {tunnel.local_bind_port}")
+            conn = None
+            cursor = None
+            try:
+                conn = pymysql.connect(
+                    host='127.0.0.1',
+                    port=tunnel.local_bind_port,
+                    user=DB_USER,
+                    password=DB_PASSWORD,
+                    db=DB_NAME,
+                    charset='utf8mb4',
+                    cursorclass=pymysql.cursors.DictCursor
+                )
+                cursor = conn.cursor()
+                create_table_sql = f"""
+                CREATE TABLE IF NOT EXISTS `{table_name}` (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    timestamp BIGINT NOT NULL COMMENT '時間戳 (毫秒)',
+                    x FLOAT NOT NULL COMMENT 'X 軸角速度',
+                    y FLOAT NOT NULL COMMENT 'Y 軸角速度',
+                    z FLOAT NOT NULL COMMENT 'Z 軸角速度',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '紀錄創建時間'
+                );
+                """
+                print(f"執行 SQL: CREATE TABLE IF NOT EXISTS `{table_name}` ...")
+                cursor.execute(create_table_sql)
+                conn.commit()
+                print(f"資料表 `{table_name}` 建立或確認存在成功！")
+            except pymysql.MySQLError as db_err:
+                print(f"資料庫操作失敗: {db_err}")
+            except Exception as e:
+                 print(f"建立資料表時發生未預期錯誤: {e}")
+            finally:
+                if cursor:
+                    cursor.close()
+                if conn:
+                    conn.close()
+                print("資料庫連線已關閉")
+    except Exception as tunnel_err:
+        print(f"建立 SSH 隧道失敗: {tunnel_err}")
+        exit(1)
+    return table_name
+
 def bluetooth_thread():
-    """
-    建立藍牙 RFCOMM 伺服器，等待藍牙連線，
-    接收資料後解析為 JSON，並同時放入廣播與資料庫隊列中
-    """
-    server_sock = BluetoothSocket(RFCOMM)
+    server_sock = None
+    client_sock = None
     try:
-        # 直接指定通道 4
-        server_sock.bind(("", 4))
-        port = 4
-        print(f"綁定成功，使用通道 {port}")
-    except OSError as e:
-        print(f"綁定通道 4 失敗：{e}")
-        exit()
-    server_sock.listen(1)
-    
-    print("等待藍牙連接...")
-    client_sock, client_info = server_sock.accept()
-    print("已連接:", client_info)
-    
-    try:
+        server_sock = BluetoothSocket(RFCOMM)
+        server_sock.bind(("", BLUETOOTH_CHANNEL))
+        server_sock.listen(1)
+        print(f"藍牙 RFCOMM 伺服器啟動，監聽通道 {BLUETOOTH_CHANNEL}...")
+        print("等待藍牙客戶端連接...")
+        client_sock, client_info = server_sock.accept()
+        print(f"藍牙已連接: {client_info}")
         buffer = ""
         while True:
-            data = client_sock.recv(1024)
-            if not data:
+            try:
+                data = client_sock.recv(1024)
+                if not data:
+                    print("藍牙連接已由客戶端關閉。")
+                    break
+                buffer += data.decode('utf-8', errors='ignore')
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    line = line.strip()
+                    if line:
+                        try:
+                            json_data = json.loads(line)
+                            if all(k in json_data for k in ('timestamp', 'x', 'y', 'z')):
+                                print(f"接收到有效 JSON: {json_data}")
+                                broadcast_queue.put(json_data)
+                                db_queue.put(json_data)
+                            else:
+                                print(f"JSON 數據缺少必要欄位: {line}")
+                        except json.JSONDecodeError:
+                            print(f"接收到無效的 JSON 格式數據: {line}")
+            except IOError as e:
+                print(f"藍牙接收 IO 錯誤: {e}")
                 break
-            # 將收到的資料累積到 buffer 中（因可能分段傳送）
-            buffer += data.decode('utf-8', errors='ignore')
-            # 利用換行符號拆解多筆 JSON 資料
-            while "\n" in buffer:
-                line, buffer = buffer.split("\n", 1)
-                line = line.strip()
-                if line:
-                    try:
-                        json_data = json.loads(line)
-                        print("接收到 JSON:", json_data)
-                        # 分流至廣播與資料庫隊列
-                        broadcast_queue.put(json_data)
-                        db_queue.put(json_data)
-                    except json.JSONDecodeError:
-                        print(f"無效的 JSON 數據: {line}")
+    except OSError as e:
+        print(f"藍牙伺服器綁定通道 {BLUETOOTH_CHANNEL} 失敗: {e}")
+        exit(1)
+    except Exception as e:
+        print(f"藍牙線程發生未預期錯誤: {e}")
     finally:
-        client_sock.close()
-        server_sock.close()
-
-
-# WebSocket 連線處理
+        if client_sock:
+            print("關閉藍牙客戶端 socket...")
+            client_sock.close()
+        if server_sock:
+            print("關閉藍牙伺服器 socket...")
+            server_sock.close()
+        print("藍牙線程結束。")
 
 async def websocket_handler(websocket):
-    """
-    當 WebSocket 客戶端連線時，
-    將其加入全域 clients 集合，並監聽訊息（可依需求進行控制邏輯）
-    """
+    print(f"WebSocket 客戶端連接: {websocket.remote_address}")
     clients.add(websocket)
     try:
         async for message in websocket:
             try:
                 data = json.loads(message)
-                if data.get('type') == 'gyro':
-                    print(f"接收到陀螺儀數據: {data}")
-                    # 此處可根據需求加入額外控制邏輯
-            except json.JSONDecodeError as e:
-                print(f"Error decoding message: {e}")
+                print(f"收到來自 {websocket.remote_address} 的訊息: {data}")
+            except json.JSONDecodeError:
+                print(f"收到來自 {websocket.remote_address} 的無效 JSON 訊息: {message}")
+            except Exception as e:
+                 print(f"處理來自 {websocket.remote_address} 的訊息時出錯: {e}")
+    except Exception as e:
+         print(f"WebSocket 連接錯誤 ({websocket.remote_address}): {e}")
     finally:
+        print(f"WebSocket 客戶端斷開連接: {websocket.remote_address}")
         clients.remove(websocket)
 
-
-# WebSocket 廣播任務
-
 async def broadcast_data():
-    """
-    從 broadcast_queue 讀取資料，並將 JSON 資料包裝後廣播給所有連線的 WebSocket 客戶端
-    """
+    print("啟動 WebSocket 廣播任務...")
     while True:
-        if not broadcast_queue.empty():
-            data = broadcast_queue.get()
-            if clients:
-                message = json.dumps({
-                    'type': 'gyro',
-                    'x': data['x'],
-                    'y': data['y'],
-                    'z': data['z']
-                })
-                await asyncio.gather(*[client.send(message) for client in clients])
-        await asyncio.sleep(0.1)
-
-
-# 資料庫插入線程 (批次插入)
+        try:
+            if not broadcast_queue.empty():
+                data = broadcast_queue.get_nowait()
+                if clients:
+                    message = json.dumps({
+                        'type': 'gyro',
+                        'x': data.get('x'),
+                        'y': data.get('y'),
+                        'z': data.get('z')
+                    })
+                    disconnected_clients = set()
+                    tasks = []
+                    for client in clients:
+                       try:
+                           tasks.append(client.send(message))
+                       except Exception:
+                           disconnected_clients.add(client)
+                    if tasks:
+                         await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.sleep(0.05)
+        except asyncio.QueueEmpty:
+             await asyncio.sleep(0.05)
+        except Exception as e:
+            print(f"廣播任務發生錯誤: {e}")
+            await asyncio.sleep(1)
 
 def db_insertion_thread():
-    """
-    透過 SSH 隧道連上 labdb，
-    將 db_queue 中的資料累積成批，達到一定數量後進行批次插入
-    """
-    BATCH_SIZE = 90  # 設定每次批次插入 90 筆資料
-    buffer = []      # 用來暫存累積的資料
-    
-    # 建立 SSH 隧道（從 dv107 連線至 labdb）
-    with SSHTunnelForwarder(
-        ('dv107.coded2.fun', 8022),
-        ssh_username='kingsley',
-        ssh_password='ji394djp4',
-        remote_bind_address=('labdb.coded2.fun', 3306)
-    ) as tunnel:
-        conn = pymysql.connect(
-            host='127.0.0.1',
-            port=tunnel.local_bind_port,
-            user='kingsley',       # 請替換成資料庫使用者名稱
-            password='ji394djp4',   # 請替換成資料庫密碼
-            db='KINGSLEY'
-        )
-        cursor = conn.cursor()
-        while True:
-            data = db_queue.get()  # 阻塞式取得下一筆資料
-            buffer.append((data['timestamp'], data['x'], data['y'], data['z']))
-            if len(buffer) >= BATCH_SIZE:
-                sql = f"INSERT INTO `{table_name}` (timestamp, x, y, z) VALUES (%s, %s, %s, %s)"
-                try:
-                    cursor.executemany(sql, buffer)
-                    conn.commit()
-                    print(f"批次插入 {len(buffer)} 筆資料")
-                except Exception as e:
-                    print("批次 DB 插入失敗:", e)
-                buffer = []
-        # 注意：此 while 迴圈永不退出，程式結束時隧道會自動關閉
-        # cursor.close()
-        # conn.close()
-
-
-# 主程式（啟動 WebSocket 服務）
+    print("啟動資料庫插入線程...")
+    buffer = []
+    try:
+        with SSHTunnelForwarder(
+            (SSH_HOST, SSH_PORT),
+            ssh_username=SSH_USERNAME,
+            ssh_password=SSH_PASSWORD,
+            remote_bind_address=(DB_REMOTE_HOST, DB_REMOTE_PORT)
+        ) as tunnel:
+            print(f"資料庫線程：SSH 隧道建立成功，本地 Port: {tunnel.local_bind_port}")
+            conn = None
+            cursor = None
+            try:
+                conn = pymysql.connect(
+                    host='127.0.0.1',
+                    port=tunnel.local_bind_port,
+                    user=DB_USER,
+                    password=DB_PASSWORD,
+                    db=DB_NAME,
+                    charset='utf8mb4',
+                    cursorclass=pymysql.cursors.DictCursor
+                )
+                cursor = conn.cursor()
+                print("資料庫線程：資料庫連接成功。")
+                while True:
+                    try:
+                        data = db_queue.get()
+                        if table_name is None:
+                            print("錯誤：table_name 尚未設定，無法插入數據。")
+                            db_queue.task_done()
+                            continue
+                        timestamp = data.get('timestamp')
+                        x = data.get('x')
+                        y = data.get('y')
+                        z = data.get('z')
+                        if None in [timestamp, x, y, z]:
+                             print(f"警告：收到的數據缺少欄位，跳過插入: {data}")
+                             db_queue.task_done()
+                             continue
+                        buffer.append((timestamp, x, y, z))
+                        if len(buffer) >= DB_BATCH_SIZE:
+                            if table_name:
+                                sql = f"INSERT INTO `{table_name}` (timestamp, x, y, z) VALUES (%s, %s, %s, %s)"
+                                try:
+                                    affected_rows = cursor.executemany(sql, buffer)
+                                    conn.commit()
+                                    print(f"成功批次插入 {affected_rows} / {len(buffer)} 筆資料到 `{table_name}`")
+                                    buffer = []
+                                except pymysql.MySQLError as db_err:
+                                    print(f"批次資料庫插入失敗: {db_err}")
+                                    conn.rollback()
+                                except Exception as e:
+                                    print(f"批次插入時發生未預期錯誤: {e}")
+                                    conn.rollback()
+                            else:
+                                 print("錯誤：table_name 為空，無法執行插入。")
+                                 buffer = []
+                        db_queue.task_done()
+                    except Exception as loop_err:
+                         print(f"資料庫線程內部循環錯誤: {loop_err}")
+                         db_queue.task_done()
+                         break
+            except pymysql.MySQLError as db_conn_err:
+                print(f"資料庫線程：資料庫連接失敗: {db_conn_err}")
+            except Exception as e:
+                print(f"資料庫線程：發生未預期錯誤: {e}")
+            finally:
+                if cursor:
+                    cursor.close()
+                if conn:
+                    conn.close()
+                print("資料庫線程：資料庫連接已關閉。")
+    except Exception as tunnel_err:
+        print(f"資料庫線程：建立 SSH 隧道失敗: {tunnel_err}")
+    print("資料庫插入線程結束。")
 
 async def main():
-    """
-    使用 asyncio 啟動 WebSocket 服務，並同時啟動 broadcast_data 任務，
-    使程式持續運行
-    """
-    async with serve(websocket_handler, "0.0.0.0", 8765):
-        asyncio.create_task(broadcast_data())
-        await asyncio.Future()  # 永遠等待
-# 程式進入點
+    if table_name is None:
+        print("錯誤：無法獲取資料表名稱，程式即將退出。")
+        return
+    server = await serve(websocket_handler, WEBSOCKET_HOST, WEBSOCKET_PORT)
+    print(f"WebSocket 伺服器啟動，監聽於 {WEBSOCKET_HOST}:{WEBSOCKET_PORT}...")
+    broadcast_task = asyncio.create_task(broadcast_data())
+    try:
+        await server.wait_closed()
+    finally:
+        print("WebSocket 伺服器正在關閉...")
+        broadcast_task.cancel()
+        try:
+            await broadcast_task
+        except asyncio.CancelledError:
+            print("廣播任務已取消。")
+
 if __name__ == "__main__":
-    # 每次啟動程式時，自動建立一個動態命名的資料表
-    table_name = create_dynamic_table()
-
-    # 啟動藍牙接收線程
-    bt_thread = threading.Thread(target=bluetooth_thread)
-    bt_thread.daemon = True
+    print("程式啟動...")
+    create_dynamic_table()
+    if table_name is None:
+        print("錯誤：未能成功建立或確認資料表，無法啟動服務。")
+        exit(1)
+    print("啟動藍牙接收線程...")
+    bt_thread = threading.Thread(target=bluetooth_thread, daemon=True)
     bt_thread.start()
-
-    # 啟動資料庫插入線程 (批次插入)
-    db_thread = threading.Thread(target=db_insertion_thread)
-    db_thread.daemon = True
+    print("啟動資料庫插入線程...")
+    db_thread = threading.Thread(target=db_insertion_thread, daemon=True)
     db_thread.start()
-
-    # 啟動 WebSocket 服務
-    asyncio.run(main())
+    try:
+        print("啟動 asyncio 事件循環和 WebSocket 服務...")
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n收到 Ctrl+C，程式準備結束...")
+    finally:
+        print("程式執行完畢。")
